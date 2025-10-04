@@ -6,12 +6,11 @@ on:
       - 'README.md'
     branches: [ main, master ]
 
-permissions:
-  contents: write
-
 jobs:
   generate-changelog:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout do código
@@ -22,32 +21,32 @@ jobs:
 
     - name: Configurar Git
       run: |
-        git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
+        git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
     - name: Verificar se existe changelog
       id: check_changelog
       run: |
         if [ -f "CHANGELOG.md" ]; then
-          echo "changelog_exists=true" >> $GITHUB_OUTPUT
+          echo "exists=true" >> $GITHUB_OUTPUT
+          # Obter última versão do changelog existente
+          CURRENT_VERSION=$(grep -E '^## \[[0-9]+\.[0-9]+\]' CHANGELOG.md | head -1 | sed -E 's/^## \[([0-9]+\.[0-9]+)\].*/\1/' || echo "")
+          if [ -n "$CURRENT_VERSION" ]; then
+            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          fi
         else
-          echo "changelog_exists=false" >> $GITHUB_OUTPUT
+          echo "exists=false" >> $GITHUB_OUTPUT
         fi
 
-    - name: Obter versão atual
-      id: get_version
+    - name: Calcular nova versão
+      id: new_version
       run: |
-        if [ "${{ steps.check_changelog.outputs.changelog_exists }}" = "true" ]; then
-          CURRENT_VERSION=$(grep -oP '^## \Kv?\d+\.\d+' CHANGELOG.md | head -1 || echo "")
-          if [ -z "$CURRENT_VERSION" ]; then
-            echo "version=1.0" >> $GITHUB_OUTPUT
-          else
-            # Incrementa a versão minor
-            MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1 | sed 's/v//')
-            MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
-            NEW_MINOR=$((MINOR + 1))
-            echo "version=${MAJOR}.${NEW_MINOR}" >> $GITHUB_OUTPUT
-          fi
+        if [ "${{ steps.check_changelog.outputs.exists }}" = "true" ] && [ -n "${{ steps.check_changelog.outputs.version }}" ]; then
+          OLD_VERSION="${{ steps.check_changelog.outputs.version }}"
+          MAJOR=$(echo $OLD_VERSION | cut -d. -f1)
+          MINOR=$(echo $OLD_VERSION | cut -d. -f2)
+          NEW_MINOR=$((MINOR + 1))
+          echo "version=${MAJOR}.${NEW_MINOR}" >> $GITHUB_OUTPUT
         else
           echo "version=1.0" >> $GITHUB_OUTPUT
         fi
@@ -55,41 +54,49 @@ jobs:
     - name: Obter mudanças do README
       id: get_changes
       run: |
-        # Obtém o commit atual e anterior
-        CURRENT_COMMIT=${{ github.sha }}
-        PREVIOUS_COMMIT=$(git log --oneline -n 2 --format=%H | tail -1)
+        # Obtém os últimos 2 commits para comparar
+        git fetch --depth=2
+        CURRENT_COMMIT="${{ github.sha }}"
+        PREVIOUS_COMMIT=$(git log --format=%H -n 2 | tail -1)
         
-        if [ "$CURRENT_COMMIT" = "$PREVIOUS_COMMIT" ]; then
-          CHANGES="- Versão inicial do README.md"
+        echo "Current: $CURRENT_COMMIT"
+        echo "Previous: $PREVIOUS_COMMIT"
+        
+        if [ "$CURRENT_COMMIT" = "$PREVIOUS_COMMIT" ] || [ -z "$PREVIOUS_COMMIT" ]; then
+          echo "changes=- Versão inicial do README.md" >> $GITHUB_OUTPUT
         else
-          CHANGES=$(git diff $PREVIOUS_COMMIT $CURRENT_COMMIT -- README.md | grep '^+' | grep -v '^+++' | sed 's/^+//' | head -5)
-          if [ -z "$CHANGES" ]; then
-            CHANGES="- Atualizações no README.md"
+          # Obtém diff apenas do README.md
+          if git diff $PREVIOUS_COMMIT $CURRENT_COMMIT --name-only | grep -q "README.md"; then
+            CHANGES=$(git diff $PREVIOUS_COMMIT $CURRENT_COMMIT -- README.md | \
+              grep '^+' | grep -v '^+++' | \
+              sed 's/^+//' | \
+              head -10 | \
+              sed 's/^/- /')
+            
+            if [ -z "$CHANGES" ]; then
+              echo "changes=- Atualizações gerais no README.md" >> $GITHUB_OUTPUT
+            else
+              # Escapa para output
+              CHANGES="${CHANGES//'%'/'%25'}"
+              CHANGES="${CHANGES//$'\n'/'%0A'}"
+              echo "changes=$CHANGES" >> $GITHUB_OUTPUT
+            fi
           else
-            # Formata as mudanças
-            CHANGES=$(echo "$CHANGES" | sed 's/^/- /' | head -5)
+            echo "changes=- Atualizações no README.md" >> $GITHUB_OUTPUT
           fi
         fi
-        
-        # Escapa multiline para output
-        CHANGES="${CHANGES//'%'/'%25'}"
-        CHANGES="${CHANGES//$'\n'/'%0A'}"
-        CHANGES="${CHANGES//$'\r'/'%0D'}"
-        echo "changes=$CHANGES" >> $GITHUB_OUTPUT
 
-    - name: Gerar ou atualizar CHANGELOG
+    - name: Gerar CHANGELOG
       run: |
-        VERSION="${{ steps.get_version.outputs.version }}"
-        CHANGES="${{ steps.get_changes.outputs.changes }}"
+        VERSION="${{ steps.new_version.outputs.version }}"
         DATE=$(date +'%Y-%m-%d')
         
         # Decodifica as mudanças
+        CHANGES="${{ steps.get_changes.outputs.changes }}"
         CHANGES="${CHANGES//'%0A'/$'\n'}"
-        CHANGES="${CHANGES//'%0D'/$'\r'}"
         CHANGES="${CHANGES//'%25'/'%'}"
         
-        if [ "${{ steps.check_changelog.outputs.changelog_exists }}" = "false" ]; then
-          # Cria novo changelog
+        if [ "${{ steps.check_changelog.outputs.exists }}" = "false" ]; then
           cat > CHANGELOG.md << EOF
 # Changelog
 
@@ -101,28 +108,33 @@ $CHANGES
 
 EOF
         else
-          # Atualiza changelog existente
-          HEADER="# Changelog
+          # Cria um arquivo temporário com o novo conteúdo no topo
+          cat > CHANGELOG_new.md << EOF
+# Changelog
 
 Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 
 ## [$VERSION] - $DATE
 
-$CHANGES"
+$CHANGES
 
-          echo "$HEADER" > temp_changelog.md
-          if [ -s CHANGELOG.md ]; then
-            tail -n +3 CHANGELOG.md >> temp_changelog.md
-          fi
-          mv temp_changelog.md CHANGELOG.md
+EOF
+          # Adiciona o conteúdo antigo (pula o header)
+          tail -n +4 CHANGELOG.md >> CHANGELOG_new.md
+          mv CHANGELOG_new.md CHANGELOG.md
         fi
+        
+        echo "CHANGELOG.md atualizado para versão $VERSION"
+        cat CHANGELOG.md
 
-    - name: Commit e push do CHANGELOG
+    - name: Fazer commit das mudanças
       run: |
         git add CHANGELOG.md
-        if ! git diff --staged --quiet; then
-          git commit -m "docs: atualiza CHANGELOG para versão ${{ steps.get_version.outputs.version }}"
-          git push
-        else
+        
+        if git diff --staged --quiet; then
           echo "Nenhuma mudança para commitar"
+          exit 0
         fi
+        
+        git commit -m "docs: atualiza CHANGELOG para versão ${{ steps.new_version.outputs.version }}"
+        git push
