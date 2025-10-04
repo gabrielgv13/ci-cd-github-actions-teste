@@ -14,12 +14,13 @@ jobs:
     - name: Checkout do código
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # Pega todo o histórico para comparar mudanças
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Configurar Git
       run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
 
     - name: Verificar se existe changelog
       id: check_changelog
@@ -34,7 +35,7 @@ jobs:
       id: get_version
       run: |
         if [ "${{ steps.check_changelog.outputs.changelog_exists }}" = "true" ]; then
-          CURRENT_VERSION=$(grep -oP '^## \Kv?\d+\.\d+' CHANGELOG.md | head -1)
+          CURRENT_VERSION=$(grep -oP '^## \Kv?\d+\.\d+' CHANGELOG.md | head -1 || echo "")
           if [ -z "$CURRENT_VERSION" ]; then
             echo "version=1.0" >> $GITHUB_OUTPUT
           else
@@ -42,7 +43,7 @@ jobs:
             MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1 | sed 's/v//')
             MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
             NEW_MINOR=$((MINOR + 1))
-            echo "version=v${MAJOR}.${NEW_MINOR}" >> $GITHUB_OUTPUT
+            echo "version=${MAJOR}.${NEW_MINOR}" >> $GITHUB_OUTPUT
           fi
         else
           echo "version=1.0" >> $GITHUB_OUTPUT
@@ -53,17 +54,17 @@ jobs:
       run: |
         # Obtém o commit atual e anterior
         CURRENT_COMMIT=${{ github.sha }}
-        PREVIOUS_COMMIT=$(git log --oneline --grep="Merge pull request" -n 1 --skip=1 --format=%H 2>/dev/null || git rev-parse HEAD~1 2>/dev/null || echo "")
+        PREVIOUS_COMMIT=$(git log --oneline -n 2 --format=%H | tail -1)
         
-        if [ -z "$PREVIOUS_COMMIT" ]; then
+        if [ "$CURRENT_COMMIT" = "$PREVIOUS_COMMIT" ]; then
           CHANGES="- Versão inicial do README.md"
         else
-          CHANGES=$(git diff $PREVIOUS_COMMIT $CURRENT_COMMIT -- README.md | grep '^+' | grep -v '^+++' | sed 's/^+//' | head -10)
+          CHANGES=$(git diff $PREVIOUS_COMMIT $CURRENT_COMMIT -- README.md | grep '^+' | grep -v '^+++' | sed 's/^+//' | head -5)
           if [ -z "$CHANGES" ]; then
             CHANGES="- Atualizações no README.md"
           else
             # Formata as mudanças
-            CHANGES=$(echo "$CHANGES" | sed 's/^/- /' | head -10)
+            CHANGES=$(echo "$CHANGES" | sed 's/^/- /' | head -5)
           fi
         fi
         
@@ -79,35 +80,44 @@ jobs:
         CHANGES="${{ steps.get_changes.outputs.changes }}"
         DATE=$(date +'%Y-%m-%d')
         
+        # Decodifica as mudanças
+        CHANGES="${CHANGES//'%0A'/$'\n'}"
+        CHANGES="${CHANGES//'%0D'/$'\r'}"
+        CHANGES="${CHANGES//'%25'/'%'}"
+        
         if [ "${{ steps.check_changelog.outputs.changelog_exists }}" = "false" ]; then
           # Cria novo changelog
           cat > CHANGELOG.md << EOF
-        # Changelog
+# Changelog
 
-        Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
+Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 
-        ## [$VERSION] - $DATE
+## [$VERSION] - $DATE
 
-        $CHANGES
+$CHANGES
 
-        EOF
+EOF
         else
           # Atualiza changelog existente
           HEADER="# Changelog
 
-        Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
+Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 
-        ## [$VERSION] - $DATE
+## [$VERSION] - $DATE
 
-        $CHANGES"
+$CHANGES"
 
           echo "$HEADER" > temp_changelog.md
-          tail -n +3 CHANGELOG.md >> temp_changelog.md
+          sed -n '3,$p' CHANGELOG.md >> temp_changelog.md
           mv temp_changelog.md CHANGELOG.md
         fi
 
     - name: Commit e push do CHANGELOG
       run: |
         git add CHANGELOG.md
-        git diff --staged --quiet || git commit -m "docs: atualiza CHANGELOG para versão ${{ steps.get_version.outputs.version }}"
-        git push
+        if ! git diff --staged --quiet; then
+          git commit -m "docs: atualiza CHANGELOG para versão ${{ steps.get_version.outputs.version }}"
+          git push
+        else
+          echo "Nenhuma mudança para commitar"
+        fi
