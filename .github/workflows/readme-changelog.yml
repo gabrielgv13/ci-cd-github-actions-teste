@@ -1,40 +1,113 @@
-name: Gerar CHANGELOG do README
+name: Gerar Changelog do README
 
 on:
   push:
     paths:
-      - "README.md"
+      - 'README.md'
+    branches: [ main, master ]
 
 jobs:
-  changelog:
+  generate-changelog:
     runs-on: ubuntu-latest
-    if: github.actor != 'github-actions[bot]'  # evita loop
-
+    
     steps:
-      - name: Checkout do repositório
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    - name: Checkout do código
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Pega todo o histórico para comparar mudanças
 
-      - name: Criar/atualizar CHANGELOG.md
-        run: |
-          printf "## %s - Alteração no README\n\n- Commit: %s\n- Autor: %s\n- Mensagem: %s\n\n" \
-            "$(date -u +"%Y-%m-%d %H:%M:%SZ")" "$GITHUB_SHA" "$GITHUB_ACTOR" "$(git log -1 --pretty=%B)" \
-            >> CHANGELOG.md
+    - name: Configurar Git
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
 
-      - name: Configurar Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+    - name: Verificar se existe changelog
+      id: check_changelog
+      run: |
+        if [ -f "CHANGELOG.md" ]; then
+          echo "changelog_exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "changelog_exists=false" >> $GITHUB_OUTPUT
+        fi
 
-      - name: Commitar e dar push (só se houver mudanças)
-        run: |
-          git add CHANGELOG.md
-          if git diff --cached --quiet; then
-            echo "Sem alterações para commitar"
+    - name: Obter versão atual
+      id: get_version
+      run: |
+        if [ "${{ steps.check_changelog.outputs.changelog_exists }}" = "true" ]; then
+          CURRENT_VERSION=$(grep -oP '^## \Kv?\d+\.\d+' CHANGELOG.md | head -1)
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "version=1.0" >> $GITHUB_OUTPUT
           else
-            git commit -m "Atualização automática do CHANGELOG (README editado)"
-            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:${{ github.ref_name }}
+            # Incrementa a versão minor
+            MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1 | sed 's/v//')
+            MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
+            NEW_MINOR=$((MINOR + 1))
+            echo "version=v${MAJOR}.${NEW_MINOR}" >> $GITHUB_OUTPUT
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        else
+          echo "version=1.0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Obter mudanças do README
+      id: get_changes
+      run: |
+        # Obtém o commit atual e anterior
+        CURRENT_COMMIT=${{ github.sha }}
+        PREVIOUS_COMMIT=$(git log --oneline --grep="Merge pull request" -n 1 --skip=1 --format=%H 2>/dev/null || git rev-parse HEAD~1 2>/dev/null || echo "")
+        
+        if [ -z "$PREVIOUS_COMMIT" ]; then
+          CHANGES="- Versão inicial do README.md"
+        else
+          CHANGES=$(git diff $PREVIOUS_COMMIT $CURRENT_COMMIT -- README.md | grep '^+' | grep -v '^+++' | sed 's/^+//' | head -10)
+          if [ -z "$CHANGES" ]; then
+            CHANGES="- Atualizações no README.md"
+          else
+            # Formata as mudanças
+            CHANGES=$(echo "$CHANGES" | sed 's/^/- /' | head -10)
+          fi
+        fi
+        
+        # Escapa multiline para output
+        CHANGES="${CHANGES//'%'/'%25'}"
+        CHANGES="${CHANGES//$'\n'/'%0A'}"
+        CHANGES="${CHANGES//$'\r'/'%0D'}"
+        echo "changes=$CHANGES" >> $GITHUB_OUTPUT
+
+    - name: Gerar ou atualizar CHANGELOG
+      run: |
+        VERSION="${{ steps.get_version.outputs.version }}"
+        CHANGES="${{ steps.get_changes.outputs.changes }}"
+        DATE=$(date +'%Y-%m-%d')
+        
+        if [ "${{ steps.check_changelog.outputs.changelog_exists }}" = "false" ]; then
+          # Cria novo changelog
+          cat > CHANGELOG.md << EOF
+        # Changelog
+
+        Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
+
+        ## [$VERSION] - $DATE
+
+        $CHANGES
+
+        EOF
+        else
+          # Atualiza changelog existente
+          HEADER="# Changelog
+
+        Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
+
+        ## [$VERSION] - $DATE
+
+        $CHANGES"
+
+          echo "$HEADER" > temp_changelog.md
+          tail -n +3 CHANGELOG.md >> temp_changelog.md
+          mv temp_changelog.md CHANGELOG.md
+        fi
+
+    - name: Commit e push do CHANGELOG
+      run: |
+        git add CHANGELOG.md
+        git diff --staged --quiet || git commit -m "docs: atualiza CHANGELOG para versão ${{ steps.get_version.outputs.version }}"
+        git push
