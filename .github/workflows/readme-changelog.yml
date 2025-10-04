@@ -1,0 +1,39 @@
+name: Gerar CHANGELOG do README
+
+on:
+  push:
+    paths:
+      - "README.md"   # só dispara quando README for alterado
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # evita conflito de credenciais
+          fetch-depth: 0              # pega histórico completo
+
+      - name: Criar/atualizar CHANGELOG.md
+        run: |
+          echo "## Alteração no README em $(date)" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "- Commit: $GITHUB_SHA" >> CHANGELOG.md
+          echo "- Autor: $GITHUB_ACTOR" >> CHANGELOG.md
+          echo "- Mensagem: $(git log -1 --pretty=%B)" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+
+      - name: Configurar Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commitar e enviar alterações
+        run: |
+          git add CHANGELOG.md
+          git commit -m "Atualização automática do CHANGELOG (README editado)" || echo "Sem alterações para commit"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
